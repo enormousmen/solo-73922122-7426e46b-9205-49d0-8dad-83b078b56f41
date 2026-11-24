@@ -138,8 +138,13 @@ def test_new_readings_update_new_weights(bundle, old_rows):
     rows_with_vib = [{**row, NEW_COL: 0.37 * (i + 1)} for i, row in enumerate(old_rows)]
 
     before = expanded.model.fc1.weight.detach()[:, -1].clone()
-    ModelService(expanded).train_step(rows_with_vib, labels)
-    after = expanded.model.fc1.weight.detach()[:, -1]
+    svc = ModelService(expanded)
+    svc.train_step(rows_with_vib, labels)
+    # 训练成功即发布新快照；旧 bundle 保持不变（供在途预测使用）
+    after = svc.bundle.model.fc1.weight.detach()[:, -1]
+    assert torch.equal(
+        expanded.model.fc1.weight.detach()[:, -1], before
+    ), "已发布给在途预测的旧模型不应被原地修改"
 
     assert torch.equal(before, torch.zeros_like(before))
     assert not torch.equal(after, before), "新测点权重未被更新"
@@ -197,25 +202,30 @@ def test_save_and_reload_roundtrip_supports_old_predict_and_retrain(bundle, old_
     expanded = expand_bundle(load_checkpoint(src), [NEW_COL])
     labels = [i % bundle.num_classes for i in range(len(old_rows))]
     rows_with_vib = [{**row, NEW_COL: 0.1 * (i - 3)} for i, row in enumerate(old_rows)]
-    ModelService(expanded).train_step(rows_with_vib, labels)
+    svc = ModelService(expanded)
+    svc.train_step(rows_with_vib, labels)
+    trained = svc.bundle
 
     v2_path = tmp_path / "model_v2.pt"
-    save_checkpoint_atomic(expanded, str(v2_path))
+    save_checkpoint_atomic(trained, str(v2_path))
 
     # 模拟重启：从磁盘重新加载
     reloaded = load_checkpoint(str(v2_path))
     assert reloaded.feature_names == OLD_FEATURES + [NEW_COL]
 
     # 旧字段照常预测（vibration 补 0），与保存前内存模型结果一致
-    s_before = _scores(expanded.model, old_rows, expanded.feature_names, expanded.dtype)
+    s_before = _scores(trained.model, old_rows, trained.feature_names, trained.dtype)
     s_after = _scores(reloaded.model, old_rows, reloaded.feature_names, reloaded.dtype)
     assert (s_before - s_after).abs().max().item() <= TOL
 
     # Adam step 保留，且可继续训练
     step_before = int(reloaded.optimizer.state[list(reloaded.model.parameters())[0]]["step"])
     assert step_before == 201  # 初始 200 步 + 保存前续训 1 步
-    result = ModelService(reloaded).train_step(rows_with_vib, labels)
-    step_after = int(reloaded.optimizer.state[list(reloaded.model.parameters())[0]]["step"])
+    svc2 = ModelService(reloaded)
+    result = svc2.train_step(rows_with_vib, labels)
+    step_after = int(
+        svc2.bundle.optimizer.state[list(svc2.bundle.model.parameters())[0]]["step"]
+    )
     assert step_after == step_before + 1
     assert result["step"] == step_after
 

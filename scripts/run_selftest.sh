@@ -3,7 +3,13 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-PYTHON="${PYTHON:-python}"
+if [[ -n "${PYTHON:-}" ]]; then
+    :
+elif command -v python >/dev/null 2>&1; then
+    PYTHON=python
+else
+    PYTHON=python3
+fi
 
 echo "== 1. 两处硬性数值对照（容差 1e-6）=="
 "$PYTHON" - <<'EOF'
